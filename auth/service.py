@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, Header, status
 from jwt import InvalidTokenError
+
 import jwt
+
 from auth.config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
 from auth.models import Token, TokenData, User, UserInDB
 from pwdlib import PasswordHash
@@ -13,9 +15,15 @@ password_hash = PasswordHash.recommended()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-fake_users_db = {
-    "johndoe": {
-        "id": "some-unique-uuid",
+credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+fake_users_db = [
+    {
+        "id": "012e4836-b59d-4e07-a2e6-c9ac72129cf7",
         "username": "johndoe",
         "full_name": "John Doe",
         "email": "johndoe@example.com",
@@ -23,7 +31,7 @@ fake_users_db = {
         "hashed_password": "$argon2id$v=19$m=65536,t=3,p=4$wagCPXjifgvUFBzq4hqe3w$CYaIb8sB+wtD+Vu/P4uod1+Qof8h+1g7bbDlBID48Rc",
         "disabled": False,
     }
-}
+]
 
 
 def verify_password(plain_password, hashed_password):
@@ -33,15 +41,18 @@ def verify_password(plain_password, hashed_password):
 def get_password_hash(password):
     return password_hash.hash(password)
 
+def get_user_by_id(user_id: str):
+    user =next((user for user in fake_users_db if user["id"] == user_id), None)
+    if user:
+        return User(**user)
 
-def get_user(db, id: str):
-    if id in db:
-        user_dict = db[id]
-        return UserInDB(**user_dict)
-
+def get_user_by_username(username: str):
+    user =next((user for user in fake_users_db if user["username"] == username), None)
+    if user:
+        return UserInDB(**user)
 
 def authenticate_user(username: str, password: str):
-    user = get_user(fake_users_db, username)
+    user = get_user_by_username(username)
     if not user:
         return False
     if not verify_password(password, user.hashed_password):
@@ -74,24 +85,27 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-
-async def get_current_user(request: Request):
-    user_id = request.headers.get("kumva-user-id")
-    user = get_user(fake_users_db, id=user_id)
-    print(dict(request.headers))
-    print("Current user ID from header:", user_id)
+async def get_auth_user(token: Annotated[str, Depends(oauth2_scheme)]):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except InvalidTokenError:
+        raise credentials_exception
+    user = get_user_by_username(token_data.username)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise credentials_exception
+    return user 
+
+async def get_current_user(user_id: Annotated[str | None, Header(alias="kumva-user-id")]=None):
+    user = get_user_by_id(user_id)
+    if user is None:
+        raise credentials_exception
+    if user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
     return user
 
 
-async def get_current_active_user(
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    if current_user.disabled:
-        raise HTTPException(status_code=400, detail="Inactive user")
-    return current_user
+
