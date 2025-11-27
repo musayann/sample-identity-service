@@ -16,13 +16,6 @@ def read_root(request: Request):
     return {"Hello": "World", "headers": dict(request.headers)}
 
 
-@app.get("/me")
-async def read_users_me(
-    current_user: Annotated[User, Depends(get_current_user)]
-):
-    return {"user": current_user}
-
-
 @app.get("/items")
 async def read_own_items(
     current_user: Annotated[User, Depends(get_current_user)],
